@@ -1,0 +1,3 @@
+dependencies {
+    // Shared value types and wire messages have no other internal project dependencies.
+}

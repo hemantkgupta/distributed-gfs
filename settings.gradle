@@ -1,0 +1,2 @@
+rootProject.name = 'distributed-gfs'
+include 'gfs-common', 'gfs-oplog', 'gfs-master', 'gfs-replication', 'gfs-chunkserver', 'gfs-client', 'gfs-simulator'

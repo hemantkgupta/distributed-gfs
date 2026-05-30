@@ -1,0 +1,8 @@
+dependencies {
+    implementation project(':gfs-common')
+    testImplementation project(':gfs-master')
+    testImplementation project(':gfs-chunkserver')
+    testImplementation project(':gfs-oplog')
+}
+
+
