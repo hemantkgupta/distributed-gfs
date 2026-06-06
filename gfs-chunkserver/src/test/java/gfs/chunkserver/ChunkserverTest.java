@@ -229,6 +229,58 @@ class ChunkserverTest {
         }
     }
 
+    @Test
+    @Timeout(value = 5, unit = TimeUnit.SECONDS)
+    void testFailedSecondaryCommitIsReportedOnceOnHeartbeat() throws Exception {
+        ChunkHandle handle = new ChunkHandle(888L);
+        BlockingQueue<Heartbeat> heartbeats = new LinkedBlockingQueue<>();
+
+        mockMaster = new MockServer(req -> {
+            if (req.type() == MessageType.HEARTBEAT) {
+                heartbeats.add((Heartbeat) req.payload());
+                return new WireMessage(req.reqId(), MessageType.HEARTBEAT_ACK,
+                        new HeartbeatAck(List.of(), List.of()));
+            }
+            return null;
+        });
+        masterId = ChunkserverId.of("127.0.0.1", mockMaster.getPort());
+
+        int unusedPort;
+        try (ServerSocket socket = new ServerSocket(0)) {
+            unusedPort = socket.getLocalPort();
+        }
+
+        ChunkStore store = new ChunkStore(tempDir1);
+        ChunkserverId primaryId = ChunkserverId.of("127.0.0.1", 0);
+        ChunkserverId downSecondary = ChunkserverId.of("127.0.0.1", unusedPort);
+
+        try (Chunkserver chunkserver = new Chunkserver(primaryId, store, clock, masterId)) {
+            Instant grantedAt = clock.instant();
+            chunkserver.grantLeaseLocally(new LeaseToken(handle, primaryId, grantedAt, grantedAt.plusSeconds(60)));
+
+            byte[] data = "stale replica report".getBytes();
+            chunkserver.bufferBytes(handle, data);
+
+            WireMessage response = chunkserver.handleRpc(new WireMessage(201, MessageType.COMMIT_WRITE_REQUEST,
+                    new CommitWriteRequest(handle, 0, data.length, List.of(downSecondary))));
+
+            assertThat(response.type()).isEqualTo(MessageType.COMMIT_RESPONSE);
+            CommitResponse commit = (CommitResponse) response.payload();
+            assertThat(commit.success()).isFalse();
+            assertThat(commit.errorMessage()).contains("Failed to connect to secondary");
+
+            chunkserver.sendHeartbeat();
+            Heartbeat firstHeartbeat = heartbeats.poll(2, TimeUnit.SECONDS);
+            assertThat(firstHeartbeat).isNotNull();
+            assertThat(firstHeartbeat.staleReplicaReports()).containsExactly(handle);
+
+            chunkserver.sendHeartbeat();
+            Heartbeat secondHeartbeat = heartbeats.poll(2, TimeUnit.SECONDS);
+            assertThat(secondHeartbeat).isNotNull();
+            assertThat(secondHeartbeat.staleReplicaReports()).isEmpty();
+        }
+    }
+
     static class MockServer implements AutoCloseable {
         private final ServerSocket ss;
         private final ExecutorService executor = Executors.newCachedThreadPool();

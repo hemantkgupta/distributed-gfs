@@ -20,8 +20,8 @@ public class Chunkserver implements AutoCloseable {
     private final ConcurrentHashMap<ChunkHandle, LeaseToken> heldLeases = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<ChunkHandle, byte[]> bufferedBytesMap = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<ChunkHandle, AtomicLong> chunkSerials = new ConcurrentHashMap<>();
-    private final List<ChunkserverId> staleReplicaReports = new CopyOnWriteArrayList<>();
     private final Set<ChunkHandle> recentlyAddedChunks = ConcurrentHashMap.newKeySet();
+    private final Set<ChunkHandle> staleHandles = ConcurrentHashMap.newKeySet();
 
     private final ScheduledExecutorService heartbeatScheduler = Executors.newSingleThreadScheduledExecutor();
     private final ExecutorService taskExecutor = Executors.newCachedThreadPool();
@@ -56,52 +56,7 @@ public class Chunkserver implements AutoCloseable {
             List<ChunkHandle> recentlyAddedList = new ArrayList<>(recentlyAddedChunks);
             recentlyAddedChunks.removeAll(recentlyAddedList);
 
-            List<ChunkHandle> staleReports = new ArrayList<>();
-            for (ChunkserverId cs : staleReplicaReports) {
-                // If a secondary failed, we report it. Since staleReplicaReports has ChunkserverIds,
-                // and GFS heartbeat expects List<ChunkHandle> for staleReplicaReports?
-                // Wait! Let's check Heartbeat constructor in gfs-common.
-                // In gfs-common, Heartbeat has: List<ChunkHandle> staleReplicaReports.
-                // Ah! The list is of ChunkHandles, not ChunkserverIds!
-                // Wait, if it's List<ChunkHandle> staleReplicaReports, then how does Master know WHICH replica is stale?
-                // In Master.java, handleHeartbeat (line 446):
-                // for (ChunkHandle handle : hb.staleReplicaReports()) {
-                //     ChunkMetadata metadata = chunkMap.get(handle);
-                //     if (metadata != null) {
-                //         ... removes all OTHER replicas and marks them stale, leaving only the reporting chunkserver as primary!
-                //     }
-                // }
-                // So the chunkserver reports the ChunkHandle of the chunk that failed.
-                // Let's check: yes! In Heartbeat.java, it is List<ChunkHandle> staleReplicaReports.
-            }
-        } catch (Exception e) {
-            // Ignored
-        }
-
-        // Real heartbeat implementation:
-        try {
-            List<ChunkHandle> chunksHeld = chunkStore.listChunks();
-            Map<ChunkHandle, Long> chunkSizes = new HashMap<>();
-            for (ChunkHandle h : chunksHeld) {
-                try {
-                    chunkSizes.put(h, chunkStore.lengthOf(h));
-                } catch (IOException e) {
-                    // Ignored
-                }
-            }
-
-            boolean leaseRenewalRequested = !heldLeases.isEmpty();
-            heldLeases.entrySet().removeIf(e -> !e.getValue().isValid(clock.instant()));
-
-            List<ChunkHandle> recentlyAddedList = new ArrayList<>(recentlyAddedChunks);
-            recentlyAddedChunks.removeAll(recentlyAddedList);
-
-            // We need to report the ChunkHandles that had stale replicas.
-            // Let's create a thread-safe list of stale ChunkHandles we want to report.
-            List<ChunkHandle> staleHandlesToReport = new ArrayList<>();
-            // We'll populate this if there are failures. Let's make a set or list for it.
-            staleHandlesToReport.addAll(staleHandles);
-            staleHandles.removeAll(staleHandlesToReport);
+            List<ChunkHandle> staleHandlesToReport = new ArrayList<>(staleHandles);
 
             Heartbeat hb = new Heartbeat(
                     id,
@@ -122,6 +77,7 @@ public class Chunkserver implements AutoCloseable {
 
                 WireMessage resp = WireCodec.decode(in);
                 if (resp.payload() instanceof HeartbeatAck ack) {
+                    staleHandles.removeAll(staleHandlesToReport);
                     processHeartbeatAck(ack);
                 }
             }
@@ -129,8 +85,6 @@ public class Chunkserver implements AutoCloseable {
             // Ignored
         }
     }
-
-    private final Set<ChunkHandle> staleHandles = ConcurrentHashMap.newKeySet();
 
     private void processHeartbeatAck(HeartbeatAck ack) {
         if (ack.chunksToDelete() != null) {
